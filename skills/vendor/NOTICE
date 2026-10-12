@@ -1,0 +1,11 @@
+This directory contains materials from:
+
+  https://github.com/anthropics/claude-for-legal
+
+Copyright Anthropic and contributors.
+Licensed under the Apache License, Version 2.0.
+See ./LICENSE for the full license text.
+
+Capco Contract Assists vendors the commercial-legal and employment-legal
+plugins for in-product skill management and review routing. Outputs produced
+using these skills remain drafts for attorney review and are not legal advice.

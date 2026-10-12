@@ -1,0 +1,13 @@
+{
+  "id": "master-service-agreement-template",
+  "name": "Master Service Agreement",
+  "category": "MSA",
+  "agreement_type": "MSA",
+  "description": "Uploaded MSA template. 11 yellow fields detected (AI + blank analysis).",
+  "discovery": {
+    "bracket_highlights": 13,
+    "underscore_highlights": 0,
+    "ai_highlights": 0,
+    "field_count": 11
+  }
+}

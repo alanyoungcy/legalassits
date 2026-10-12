@@ -1,0 +1,299 @@
+# LegalAssists — local Docker stack
+# Base images pinned to tags already present on this machine (judex-capco / ontology_hkex-demo).
+# pull_policy: never prevents accidental re-downloads.
+
+name: legalassits
+
+x-pull-never: &pull-never
+  pull_policy: never
+
+services:
+  postgres:
+    <<: *pull-never
+    image: postgres:16-alpine
+    container_name: legalassits-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-legal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-legal}
+      POSTGRES_DB: ${POSTGRES_DB:-legalassits}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - legalassits_postgres_data:/var/lib/postgresql/data
+      - ./docker/init/01_extensions.sql:/docker-entrypoint-initdb.d/01_extensions.sql:ro
+      - ./docker/init/02_schema.sql:/docker-entrypoint-initdb.d/02_schema.sql:ro
+      - ./docker/init/03_seed.sql:/docker-entrypoint-initdb.d/03_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - legalassits-network
+
+  qdrant:
+    <<: *pull-never
+    # ontology_hkex-demo pin; also available locally as qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.12.5
+    container_name: legalassits-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - legalassits_qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - legalassits-network
+
+  neo4j:
+    <<: *pull-never
+    image: neo4j:5.26-community
+    container_name: legalassits-neo4j
+    restart: unless-stopped
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-legalassits}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - legalassits_neo4j_data:/data
+      - legalassits_neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - legalassits-network
+
+  rabbitmq:
+    <<: *pull-never
+    image: rabbitmq:3.13-management-alpine
+    container_name: legalassits-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-legal}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-legal}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/legalassits}
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - legalassits_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - legalassits-network
+
+  redis:
+    <<: *pull-never
+    image: redis:7-alpine
+    container_name: legalassits-redis
+    restart: unless-stopped
+    profiles: ["cache", "full"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - legalassits_redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - legalassits-network
+
+  minio:
+    <<: *pull-never
+    image: minio/minio:latest
+    container_name: legalassits-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-legalassits}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-legalassits}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - legalassits_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - legalassits-network
+
+  minio-init:
+    <<: *pull-never
+    image: minio/mc:latest
+    container_name: legalassits-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-legalassits} $${MINIO_ROOT_PASSWORD:-legalassits}; do sleep 2; done;
+      mc mb -p local/legalassits-contracts || true;
+      mc anonymous set none local/legalassits-contracts || true;
+      exit 0;
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-legalassits}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-legalassits}
+    networks:
+      - legalassits-network
+
+  api:
+    <<: *pull-never
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: legalassits-api:local
+    container_name: legalassits-api
+    restart: unless-stopped
+    profiles: ["app", "full"]
+    environment:
+      TEMPLATES_DIR: /app/templates
+      DATA_DIR: /app/data
+      SKILLS_VENDOR_DIR: /app/skills/vendor
+      SKILLS_PLAYBOOKS_DIR: /app/skills/playbooks
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      COPILOT_NAME: ${COPILOT_NAME:-Capco Wayne}
+      API_KEY: ${API_KEY:-}
+      BASE_URL: ${BASE_URL:-https://api.openai.com/v1}
+      MODEL: ${MODEL:-gpt-4o-mini}
+      TEMPERATURE: ${TEMPERATURE:-0.2}
+      MAX_TOKENS: ${MAX_TOKENS:-2048}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-legal}:${POSTGRES_PASSWORD:-legal}@postgres:5432/${POSTGRES_DB:-legalassits}
+      QDRANT_URL: http://qdrant:6333
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-legalassits}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-legal}:${RABBITMQ_PASSWORD:-legal}@rabbitmq:5672${RABBITMQ_VHOST:-/legalassits}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-legalassits}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-legalassits}
+      S3_BUCKET: legalassits-contracts
+    volumes:
+      - ./templates:/app/templates
+      - ./data:/app/data
+      - ./skills:/app/skills
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - legalassits-network
+
+  worker:
+    <<: *pull-never
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: legalassits-api:local
+    container_name: legalassits-worker
+    restart: unless-stopped
+    profiles: ["app", "full"]
+    command: ["python", "-m", "app.worker"]
+    environment:
+      TEMPLATES_DIR: /app/templates
+      DATA_DIR: /app/data
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-legal}:${POSTGRES_PASSWORD:-legal}@postgres:5432/${POSTGRES_DB:-legalassits}
+      QDRANT_URL: http://qdrant:6333
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-legalassits}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-legal}:${RABBITMQ_PASSWORD:-legal}@rabbitmq:5672${RABBITMQ_VHOST:-/legalassits}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-legalassits}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-legalassits}
+      S3_BUCKET: legalassits-contracts
+    volumes:
+      - ./templates:/app/templates
+      - ./data:/app/data
+      - ./skills:/app/skills
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - legalassits-network
+
+  web:
+    <<: *pull-never
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: legalassits-web:local
+    container_name: legalassits-web
+    restart: unless-stopped
+    profiles: ["app", "full"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - legalassits-network
+
+networks:
+  legalassits-network:
+    name: legalassits-network
+    driver: bridge
+
+volumes:
+  legalassits_postgres_data:
+    name: legalassits-postgres-data
+  legalassits_qdrant_data:
+    name: legalassits-qdrant-data
+  legalassits_neo4j_data:
+    name: legalassits-neo4j-data
+  legalassits_neo4j_logs:
+    name: legalassits-neo4j-logs
+  legalassits_rabbitmq_data:
+    name: legalassits-rabbitmq-data
+  legalassits_redis_data:
+    name: legalassits-redis-data
+  legalassits_minio_data:
+    name: legalassits-minio-data

@@ -1,0 +1,9 @@
+{
+  "id": "nda-mutual",
+  "name": "Mutual NDA",
+  "category": "NDA",
+  "agreement_type": "NDA",
+  "jurisdiction": "Hong Kong / UK",
+  "entity_scope": "Capco group",
+  "description": "Corporate mutual NDA for Capco."
+}
